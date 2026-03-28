@@ -29,6 +29,13 @@ interface AuthProviderProps {
   children: ReactNode;
 }
 
+const withTimeout = <T,>(promise: Promise<T>, ms: number, fallback: T): Promise<T> => {
+  return Promise.race([
+    promise,
+    new Promise<T>((resolve) => setTimeout(() => resolve(fallback), ms))
+  ]);
+};
+
 export function AuthProvider({ children }: AuthProviderProps) {
   const [user, setUser] = useState<{ id: string; profile: Profile | null } | null>(null);
   const [loading, setLoading] = useState(true);
@@ -36,32 +43,34 @@ export function AuthProvider({ children }: AuthProviderProps) {
   const [showNamePrompt, setShowNamePrompt] = useState(false);
 
   useEffect(() => {
+    let mounted = true;
+
     // Check for existing session
     const initializeAuth = async () => {
       try {
-        const currentUser = await getCurrentUser();
+        const currentUser = await withTimeout(getCurrentUser(), 8000, null);
 
-        if (currentUser) {
-          const { data: profile } = await getProfile(currentUser.id);
+        if (currentUser && mounted) {
+          const { data: profile } = await withTimeout(getProfile(currentUser.id), 8000, { data: null, error: null });
 
-          if (profile) {
-            setUser({ id: currentUser.id, profile });
-            setIsAuthReady(true);
-          } else {
-            // User exists but no profile - show name prompt
-            setUser({ id: currentUser.id, profile: null });
-            setShowNamePrompt(true);
-            setIsAuthReady(true);
+          if (mounted) {
+            if (profile) {
+              setUser({ id: currentUser.id, profile });
+              setIsAuthReady(true);
+            } else {
+              setUser({ id: currentUser.id, profile: null });
+              setShowNamePrompt(true);
+              setIsAuthReady(true);
+            }
           }
-        } else {
-          // No user - will show auth form
+        } else if (mounted) {
           setIsAuthReady(true);
         }
       } catch (error) {
         console.error('Auth initialization error:', error);
-        setIsAuthReady(true);
+        if (mounted) setIsAuthReady(true);
       } finally {
-        setLoading(false);
+        if (mounted) setLoading(false);
       }
     };
 
@@ -70,22 +79,26 @@ export function AuthProvider({ children }: AuthProviderProps) {
     // Listen for auth changes
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
       async (event, session) => {
+        if (!mounted) return;
         if (event === 'SIGNED_IN' && session?.user) {
           const { data: profile } = await getProfile(session.user.id);
-
+          if (!mounted) return;
+          
           if (profile) {
             setUser({ id: session.user.id, profile });
+            setShowNamePrompt(false);
           } else {
             setUser({ id: session.user.id, profile: null });
             setShowNamePrompt(true);
           }
         } else if (event === 'SIGNED_OUT') {
-          setUser(null);
+          if (mounted) setUser(null);
         }
       }
     );
 
     return () => {
+      mounted = false;
       subscription.unsubscribe();
     };
   }, []);
@@ -95,6 +108,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
 
     if (profile) {
       setUser({ id: userId, profile });
+      setShowNamePrompt(false);
       setIsAuthReady(true);
     } else {
       setUser({ id: userId, profile: null });
@@ -131,11 +145,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
     return <AuthForm onAuthSuccess={handleAuthSuccess} />;
   }
 
-  if (showNamePrompt) {
-    return <NamePrompt userId={user.id} onComplete={handleNameComplete} />;
-  }
-
-  if (!user.profile) {
+  if (showNamePrompt || !user.profile) {
     return <NamePrompt userId={user.id} onComplete={handleNameComplete} />;
   }
 
